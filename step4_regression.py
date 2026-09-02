@@ -19,6 +19,37 @@ from __future__ import annotations
 import sys
 import numpy as np, pandas as pd
 from scipy import stats
+from scipy.linalg import qr as _qr
+
+
+def _drop_aliased(X, names, n_keep):
+    """
+    丢掉与前面 n_keep 列共线的哑变量列, 返回 (X, names, 丢弃列数)。
+
+    为什么需要: 同时放 region FE 与 hemi_month FE 时, 南半球国家会出现
+    完全共线 —— "是南半球地区" 这个指示向量既能由所有南半球 region 哑变量相加得到,
+    也能由所有 S_* 月份哑变量相加得到(参照组丢的是 N_1, 南半球的月份哑变量一个没丢)。
+    结果设计矩阵秩亏: 实测 cond(A) 达 2e17, A^{-1} 元素量级 1e6, 三明治矩阵
+    有 37/182 个对角元是负的(最大 -1.7e6) -> np.sqrt 得 NaN, 报
+    "invalid value encountered in sqrt", 而且所有涉及列的标准误都不可信。
+
+    做法: 把 FE 块对 x 块做投影残差, 再用列主元 QR 取极大无关组。
+    x_cols 一律保留(它们是待估参数, 不可丢)。
+    """
+    n, k = X.shape
+    if k <= n_keep:
+        return X, names, 0
+    Q, _ = np.linalg.qr(X[:, :n_keep])                       # 投影到 x 块张成的空间
+    R = X[:, n_keep:] - Q @ (Q.T @ X[:, n_keep:])            # FE 块残差
+    _, rr, piv = _qr(R, mode="economic", pivoting=True)
+    d = np.abs(np.diag(rr))
+    tol = (d[0] if d.size else 0.0) * max(n, k) * np.finfo(float).eps * 1e3
+    rank = int((d > max(tol, 0.0)).sum())
+    if rank == k - n_keep:
+        return X, names, 0
+    sel = sorted(piv[:rank].tolist())                        # 保持原顺序, 便于解读
+    keep_cols = list(range(n_keep)) + [n_keep + j for j in sel]
+    return X[:, keep_cols], [names[i] for i in keep_cols], (k - n_keep) - rank
 
 from step3_analysis import monthly_panel, DEFAULT_LAG, MIN_MONTH_CASES
 
@@ -52,6 +83,7 @@ def poisson_fe(df, y, offset_cols, x_cols, fe_cols, cluster,
         blocks.append(M)
         names += [f"{f}={u}" for u in uniq[1:]]
     X = np.column_stack(blocks)
+    X, names, n_aliased = _drop_aliased(X, names, len(x_cols))
     n, k = X.shape
 
     beta = np.zeros(k)
@@ -77,7 +109,6 @@ def poisson_fe(df, y, offset_cols, x_cols, fe_cols, cluster,
 
     # 聚类稳健三明治
     A = (X.T * np.maximum(mu, 1e-12)) @ X + ridge * np.eye(k)
-    Ainv = np.linalg.inv(A)
     cl = pd.factorize(d[cluster])[0]
     meat = np.zeros((k, k))
     for g in np.unique(cl):
@@ -86,10 +117,17 @@ def poisson_fe(df, y, offset_cols, x_cols, fe_cols, cluster,
         meat += np.outer(u, u)
     G = len(np.unique(cl))
     corr = G / max(G - 1, 1)
-    V = corr * Ainv @ meat @ Ainv
-    se = np.sqrt(np.diag(V))
 
     keep = list(range(len(x_cols)))
+    # 只解出待估项对应的 A^{-1} 行, 不必构造完整的 k×k 方差矩阵(k 可达上百)。
+    # clip: V 理论上半正定, 浮点误差会让对角元出现 -1e-16 量级的负值 -> sqrt 得 NaN。
+    Sel = np.eye(k)[keep]                    # (m, k) 选择矩阵
+    B = np.linalg.solve(A, Sel.T).T          # = A^{-1}[keep, :]
+    dv = np.diag(corr * B @ meat @ B.T)
+    n_neg = int((dv < 0).sum())
+    se = np.full(k, np.nan)
+    se[keep] = np.sqrt(np.clip(dv, 0.0, None))
+
     tab = pd.DataFrame({
         "term": [names[i] for i in keep],
         "beta": beta[keep],
@@ -103,7 +141,9 @@ def poisson_fe(df, y, offset_cols, x_cols, fe_cols, cluster,
     # 伪 R2 (相对只有 offset 的截距模型)
     ll = float(np.sum(yy * np.log(np.maximum(mu, 1e-12)) - mu))
     diag = dict(n=n, k=k, n_clusters=G, loglik=ll, iters=it + 1,
-                mean_deaths=float(yy.mean()), total_deaths=float(yy.sum()))
+                mean_deaths=float(yy.mean()), total_deaths=float(yy.sum()),
+                cond_A=float(np.linalg.cond(A)), n_aliased=n_aliased,
+                n_neg_var=n_neg)
     return tab, diag
 
 

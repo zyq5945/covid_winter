@@ -26,7 +26,7 @@ import os
 import numpy as np
 import pandas as pd
 
-DATA_DIR = r"D:/q/work/my/md/xs/COVID-19-master/csse_covid_19_data/csse_covid_19_time_series_ex"
+DATA_DIR = r"./JHU_CSSE"
 
 # ---------------------------------------------------------------- 季节定义
 # 北半球：寒季(冷) 11,12,1,2,3；暖季(热) 5,6,7,8,9；过渡 4,10
@@ -111,6 +111,9 @@ def load_us(kind: str) -> pd.DataFrame:
     dcols = _split_date_cols(df.columns)
     dates = _to_dates(dcols)
     meta = ["Province_State", "Lat", "Long_"]
+    if "Admin2" in df.columns:
+        # 县级标识。保留它才能按州正确汇总人口(见 build_panel)
+        meta.append("Admin2")
     if "Population" in df.columns:
         meta.append("Population")
     m = df.melt(id_vars=meta, value_vars=dcols, var_name="date", value_name="value")
@@ -166,8 +169,23 @@ def build_panel(region_col: str, scope: str, min_final_cases: int = 0):
 
         lat_map = lat_src.groupby("Province_State").apply(_wavg_us, "Lat", include_groups=False).to_dict()
         lon_map = lat_src.groupby("Province_State").apply(_wavg_us, "Long_", include_groups=False).to_dict()
-        pop = load_us("deaths")[["Province_State", "Population"]].drop_duplicates()
-        pop_map = pop.set_index("Province_State")["Population"].to_dict()
+        # 州人口 = 该州所有县的人口之和。
+        # 坑: 原写法是 drop_duplicates([Province_State, Population]).set_index(...).to_dict(),
+        #     set_index 遇到重复索引只保留最后一行 -> 拿到的是"某一个县"的人口
+        #     (马萨诸塞只有 83 万, 实际 689 万), 而 DC / Hawaii 恰好取到 0。
+        #     人口为 0 会让 deaths_pm = inf, 后续 np.log 得到 -inf/inf,
+        #     相减变成 NaN, 表现为 step14 的 "invalid value encountered in scalar subtract"。
+        pop_src = load_us("deaths")
+        if "Admin2" in pop_src.columns:
+            pop_map = (pop_src[["Province_State", "Admin2", "Population"]]
+                       .drop_duplicates(subset=["Province_State", "Admin2"])
+                       .groupby("Province_State")["Population"].sum()
+                       .to_dict())
+        else:   # 缺县级标识时退化: 至少保证是求和而不是"取最后一行"
+            pop_map = (pop_src[["Province_State", "Population"]]
+                       .drop_duplicates()
+                       .groupby("Province_State")["Population"].sum()
+                       .to_dict())
 
     dates = np.sort(conf["date"].unique())
     regions = np.sort(conf["region"].unique())

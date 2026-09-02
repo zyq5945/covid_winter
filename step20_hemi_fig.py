@@ -53,11 +53,17 @@ ax.grid(axis="y", alpha=.3)
 ax = axes[1]
 pts = []
 for hemi, h in d.groupby("hemi"):
+    sw = (h.temp_s - h.temp_w).median()      # 半球级冬夏温差中位数 (北 14.3 / 南 4.7)
+    n = h.region.nunique()                   # 半球国家总数 (北 93 / 南 15)
+    if hemi == "北半球":
+        # 宏观点只用 2020-21 冬这个最干净的窗口: 它的后一个夏天正是奥密克戎,
+        # 而前一个夏天(2020 夏)疫情小, 用"仅前夏"做对照才不掺毒株更替 (见 4.4 节正文,
+        # 北半球干净对照 = +208%)。把两个冬天合起来取平均会被 W2 的 +12.5% 稀释成 +83%。
+        h = h[h.winter == "W1 2020-21冬"]
     v_all = h.penalty_deaths.dropna()
     v_pre = h.penalty_deaths_pre.dropna()
-    sw = (h.temp_s - h.temp_w).median()
     pts.append((hemi, sw, 100 * (np.exp(v_all.mean()) - 1),
-                100 * (np.exp(v_pre.mean()) - 1), h.region.nunique()))
+                100 * (np.exp(v_pre.mean()) - 1), n))
 for hemi, sw, y1, y2, n in pts:
     c = COLD if hemi == "北半球" else WARM
     ax.scatter(sw, y1, s=260, color=c, marker="o", zorder=3,
@@ -76,7 +82,7 @@ ax.set_title("宏观剂量-反应: 冬夏温差越大, 冬季死亡惩罚越大"
 ax.legend(fontsize=8.5, loc="lower right")
 ax.grid(alpha=.3)
 ax.set_xlim(0, 18)
-ax.set_ylim(40, 145)
+ax.set_ylim(0, 260)
 
 fig.suptitle("南半球 vs 北半球：两个相隔半年的冬天，给出同一个方向",
              fontsize=13.5, y=1.04)

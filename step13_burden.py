@@ -46,9 +46,12 @@ if __name__ == "__main__":
             rows.append(dict(scope=tag, sample=label, outcome="负担:死亡", **rd))
 
             if scope == "us":     # 有人口 -> 人均死亡
+                # 注意: 必须写 g2["pop"]。g2.pop 取到的是 DataFrame.pop 方法
+                # (移除列), 于是 float / method -> TypeError, 整个脚本中断。
                 g2 = g.dropna(subset=["pop"]).copy()
+                g2 = g2[g2["pop"] > 0]
                 rp = fit_pois(g2, "deaths", ["pop"])
-                b, se, p, n = ols_fe(g2.assign(ld=np.log(g2.deaths / g2.pop * 1e6)),
+                b, se, p, n = ols_fe(g2.assign(ld=np.log(g2["deaths"] / g2["pop"] * 1e6)),
                                      "ld", "temp_c", "pop", "region", "hemi_month", "region")
                 print(f"  人均死亡/百万  Poisson beta={rp['beta']:+.4f} se={rp['se']:.4f} "
                       f"p={rp['p']:.4g} | 每降10C: {rp['pct_per_10degC']:+.1f}%")

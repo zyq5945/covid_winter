@@ -29,6 +29,22 @@ DESIGN = [
 ]
 
 
+def _logratio(w, s1, s2):
+    """
+    log(w) - 0.5*[log(s1) + log(s2)]，带合法性检查。
+
+    直接算会在三种情况下炸出 RuntimeWarning 或 NaN：
+      - 任一项为 0        -> log(0) = -inf，两个 -inf 相减得到 NaN
+      - 任一项为 inf      -> 人口为 0 时 deaths_pm = inf，inf - inf = NaN
+      - 任一项为 NaN      -> 人口缺失时整列是 NaN
+    这三种都不该静默产出假数字，统一返回 NaN，由下游 dropna 剔除。
+    """
+    vals = (w, s1, s2)
+    if any(v is None or not np.isfinite(v) or v <= 0 for v in vals):
+        return np.nan
+    return float(np.log(w) - 0.5 * (np.log(s1) + np.log(s2)))
+
+
 def season_agg(g, start, end, val_cols):
     m = (g["date"] >= pd.Timestamp(start)) & (g["date"] <= pd.Timestamp(end))
     s = g[m]
@@ -66,16 +82,13 @@ def run(scope, minc, tag, tp=V2, lag=21):
                        cfr_s2=S2["deaths"] / S2["confirmed"],
                        temp_w=W["temp_c"], temp_s=0.5 * (S1["temp_c"] + S2["temp_c"]),
                        cases_w=W["confirmed"], cases_s=0.5 * (S1["confirmed"] + S2["confirmed"]))
-            rec["penalty_cfr"] = np.log(rec["cfr_w"]) - 0.5 * (np.log(rec["cfr_s1"]) + np.log(rec["cfr_s2"]))
-            rec["penalty_cases"] = np.log(W["confirmed"]) - 0.5 * (np.log(S1["confirmed"]) + np.log(S2["confirmed"]))
+            rec["penalty_cfr"] = _logratio(rec["cfr_w"], rec["cfr_s1"], rec["cfr_s2"])
+            rec["penalty_cases"] = _logratio(W["confirmed"], S1["confirmed"], S2["confirmed"])
             if have_pop:
-                rec["penalty_deaths_pm"] = np.log(W["deaths_pm"]) - 0.5 * (
-                    np.log(S1["deaths_pm"]) + np.log(S2["deaths_pm"]))
-                rec["penalty_cases_pm"] = np.log(W["cases_pm"]) - 0.5 * (
-                    np.log(S1["cases_pm"]) + np.log(S2["cases_pm"]))
+                rec["penalty_deaths_pm"] = _logratio(W["deaths_pm"], S1["deaths_pm"], S2["deaths_pm"])
+                rec["penalty_cases_pm"] = _logratio(W["cases_pm"], S1["cases_pm"], S2["cases_pm"])
             else:
-                rec["penalty_deaths"] = np.log(W["deaths"]) - 0.5 * (
-                    np.log(S1["deaths"]) + np.log(S2["deaths"]))
+                rec["penalty_deaths"] = _logratio(W["deaths"], S1["deaths"], S2["deaths"])
             rows.append(rec)
     return pd.DataFrame(rows)
 
